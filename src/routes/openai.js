@@ -12,25 +12,29 @@ import {
 
 const router = Router();
 
-const REQUEST_TIMEOUT = parseInt(process.env.REQUEST_TIMEOUT || '120000');
+const CONNECT_TIMEOUT = parseInt(process.env.CONNECT_TIMEOUT || '30000');
+const REQUEST_TIMEOUT = parseInt(process.env.REQUEST_TIMEOUT || '300000');
+const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '2');
+
+// ============================================
+// Helper: build target URL from key object
+// ============================================
+
+function buildTargetUrl(keyObj, path) {
+  const baseUrl = keyObj.baseUrl;
+  if (baseUrl.endsWith('/api')) {
+    return `${baseUrl}${path}`;
+  }
+  return `${baseUrl}/api${path}`;
+}
 
 // ============================================
 // Helper: proxy request to Ollama
+// isStream: if true, only apply connect timeout (not total timeout)
 // ============================================
 
-async function proxyToOllama(keyObj, path, method, body, timeout) {
-  let baseUrl = keyObj.baseUrl;
-
-  // Build target URL
-  let targetUrl;
-  if (baseUrl.endsWith('/api')) {
-    targetUrl = `${baseUrl}${path}`;
-  } else if (baseUrl.includes('ollama.com')) {
-    targetUrl = `${baseUrl}/api${path}`;
-  } else {
-    // Self-hosted: assume /api prefix
-    targetUrl = `${baseUrl}/api${path}`;
-  }
+async function proxyToOllama(keyObj, path, method, body, isStream = false) {
+  const targetUrl = buildTargetUrl(keyObj, path);
 
   const headers = {
     'Content-Type': 'application/json',
@@ -43,7 +47,10 @@ async function proxyToOllama(keyObj, path, method, body, timeout) {
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout || REQUEST_TIMEOUT);
+  // For streaming: only set a connect timeout, clear it once response headers arrive
+  // For non-streaming: set a full request timeout
+  const timeout = isStream ? CONNECT_TIMEOUT : REQUEST_TIMEOUT;
+  const timer = setTimeout(() => controller.abort(), timeout);
 
   try {
     const fetchOpts = {
@@ -57,12 +64,66 @@ async function proxyToOllama(keyObj, path, method, body, timeout) {
     }
 
     const res = await fetch(targetUrl, fetchOpts);
+    // Response headers received - connection established
     clearTimeout(timer);
     return res;
   } catch (e) {
     clearTimeout(timer);
+    if (e.name === 'AbortError') {
+      throw new Error(`Request timeout after ${timeout / 1000}s connecting to ${new URL(targetUrl).host}`);
+    }
     throw e;
   }
+}
+
+// ============================================
+// Helper: proxy with retry (try next key on failure)
+// ============================================
+
+async function proxyWithRetry(path, method, body, isStream = false) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const keyObj = keyStore.getNextKey();
+    if (!keyObj) {
+      throw { status: 503, message: 'No available API keys. Please add keys in the admin panel.' };
+    }
+
+    try {
+      const res = await proxyToOllama(keyObj, path, method, body, isStream);
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        keyStore.recordFailure(keyObj.id, `HTTP ${res.status}: ${errText.substring(0, 100)}`);
+
+        // 401/403 = key invalid, retry with next key
+        if ((res.status === 401 || res.status === 403) && attempt < MAX_RETRIES) {
+          console.warn(`[Retry] Key ${keyObj.name} got ${res.status}, trying next key (${attempt + 1}/${MAX_RETRIES})`);
+          lastError = { status: res.status, message: errText || res.statusText };
+          continue;
+        }
+
+        throw { status: res.status, message: `Ollama error: ${errText || res.statusText}` };
+      }
+
+      keyStore.recordSuccess(keyObj.id);
+      return { res, keyObj };
+    } catch (e) {
+      if (e.status) throw e; // Already formatted error
+
+      keyStore.recordFailure(keyObj.id, e.message);
+
+      if (attempt < MAX_RETRIES) {
+        console.warn(`[Retry] Key ${keyObj.name} failed: ${e.message}, trying next key (${attempt + 1}/${MAX_RETRIES})`);
+        lastError = e;
+        continue;
+      }
+
+      throw { status: 504, message: e.message };
+    }
+  }
+
+  throw { status: 504, message: lastError?.message || 'All retries exhausted' };
 }
 
 // ============================================
@@ -70,25 +131,12 @@ async function proxyToOllama(keyObj, path, method, body, timeout) {
 // ============================================
 router.get('/v1/models', async (req, res) => {
   try {
-    const keyObj = keyStore.getNextKey();
-    if (!keyObj) {
-      return res.status(503).json({ error: { message: 'No available API keys. Please add keys in the admin panel.', type: 'server_error' } });
-    }
-
-    const ollamaRes = await proxyToOllama(keyObj, '/tags', 'GET');
-
-    if (!ollamaRes.ok) {
-      keyStore.recordFailure(keyObj.id, `HTTP ${ollamaRes.status}`);
-      const errText = await ollamaRes.text().catch(() => '');
-      return res.status(ollamaRes.status).json({ error: { message: `Ollama API error: ${errText || ollamaRes.statusText}`, type: 'upstream_error' } });
-    }
-
-    keyStore.recordSuccess(keyObj.id);
+    const { res: ollamaRes } = await proxyWithRetry('/tags', 'GET', null, false);
     const data = await ollamaRes.json();
     return res.json(transformModelsResponse(data));
   } catch (e) {
     console.error('[/v1/models] Error:', e.message);
-    return res.status(500).json({ error: { message: e.message, type: 'server_error' } });
+    return res.status(e.status || 500).json({ error: { message: e.message, type: 'server_error' } });
   }
 });
 
@@ -108,23 +156,10 @@ router.post('/v1/chat/completions', async (req, res) => {
       return res.status(400).json({ error: { message: 'model is required', type: 'invalid_request_error' } });
     }
 
-    const keyObj = keyStore.getNextKey();
-    if (!keyObj) {
-      return res.status(503).json({ error: { message: 'No available API keys', type: 'server_error' } });
-    }
-
     const ollamaReq = transformChatRequest(openaiReq);
     const isStream = ollamaReq.stream !== false;
 
-    const ollamaRes = await proxyToOllama(keyObj, '/chat', 'POST', ollamaReq);
-
-    if (!ollamaRes.ok) {
-      keyStore.recordFailure(keyObj.id, `HTTP ${ollamaRes.status}`);
-      const errText = await ollamaRes.text().catch(() => '');
-      return res.status(ollamaRes.status).json({ error: { message: `Ollama error: ${errText || ollamaRes.statusText}`, type: 'upstream_error' } });
-    }
-
-    keyStore.recordSuccess(keyObj.id);
+    const { res: ollamaRes } = await proxyWithRetry('/chat', 'POST', ollamaReq, isStream);
 
     if (!isStream) {
       // Non-streaming response
@@ -137,6 +172,8 @@ router.post('/v1/chat/completions', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    // Flush headers immediately so client knows connection is alive
+    res.flushHeaders();
 
     const chatId = generateChatId();
     const created = Math.floor(Date.now() / 1000);
@@ -181,21 +218,24 @@ router.post('/v1/chat/completions', async (req, res) => {
 
     reader.on('error', (e) => {
       console.error('[stream] Error:', e.message);
-      res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`);
-      res.end();
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'stream_error' } })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+      }
     });
 
     // Handle client disconnect
     req.on('close', () => {
-      reader.destroy();
+      if (!reader.destroyed) reader.destroy();
     });
 
   } catch (e) {
     console.error('[/v1/chat/completions] Error:', e.message);
     if (!res.headersSent) {
-      return res.status(500).json({ error: { message: e.message, type: 'server_error' } });
+      return res.status(e.status || 500).json({ error: { message: e.message, type: 'server_error' } });
     }
-    res.end();
+    if (!res.writableEnded) res.end();
   }
 });
 
@@ -209,23 +249,10 @@ router.post('/v1/completions', async (req, res) => {
       return res.status(400).json({ error: { message: 'model is required', type: 'invalid_request_error' } });
     }
 
-    const keyObj = keyStore.getNextKey();
-    if (!keyObj) {
-      return res.status(503).json({ error: { message: 'No available API keys', type: 'server_error' } });
-    }
-
     const ollamaReq = transformCompletionsRequest(openaiReq);
     const isStream = ollamaReq.stream !== false;
 
-    const ollamaRes = await proxyToOllama(keyObj, '/generate', 'POST', ollamaReq);
-
-    if (!ollamaRes.ok) {
-      keyStore.recordFailure(keyObj.id, `HTTP ${ollamaRes.status}`);
-      const errText = await ollamaRes.text().catch(() => '');
-      return res.status(ollamaRes.status).json({ error: { message: `Ollama error: ${errText}`, type: 'upstream_error' } });
-    }
-
-    keyStore.recordSuccess(keyObj.id);
+    const { res: ollamaRes } = await proxyWithRetry('/generate', 'POST', ollamaReq, isStream);
 
     if (!isStream) {
       const data = await ollamaRes.json();
@@ -237,6 +264,7 @@ router.post('/v1/completions', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
 
     const chatId = generateChatId();
     const created = Math.floor(Date.now() / 1000);
@@ -291,16 +319,19 @@ router.post('/v1/completions', async (req, res) => {
     });
 
     reader.on('error', (e) => {
-      res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`);
-      res.end();
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'stream_error' } })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+      }
     });
 
-    req.on('close', () => { reader.destroy(); });
+    req.on('close', () => { if (!reader.destroyed) reader.destroy(); });
 
   } catch (e) {
     console.error('[/v1/completions] Error:', e.message);
-    if (!res.headersSent) return res.status(500).json({ error: { message: e.message, type: 'server_error' } });
-    res.end();
+    if (!res.headersSent) return res.status(e.status || 500).json({ error: { message: e.message, type: 'server_error' } });
+    if (!res.writableEnded) res.end();
   }
 });
 
@@ -314,26 +345,14 @@ router.post('/v1/embeddings', async (req, res) => {
       return res.status(400).json({ error: { message: 'model is required', type: 'invalid_request_error' } });
     }
 
-    const keyObj = keyStore.getNextKey();
-    if (!keyObj) {
-      return res.status(503).json({ error: { message: 'No available API keys', type: 'server_error' } });
-    }
-
     const ollamaReq = transformEmbeddingsRequest(openaiReq);
-    const ollamaRes = await proxyToOllama(keyObj, '/embed', 'POST', ollamaReq);
+    const { res: ollamaRes } = await proxyWithRetry('/embed', 'POST', ollamaReq, false);
 
-    if (!ollamaRes.ok) {
-      keyStore.recordFailure(keyObj.id, `HTTP ${ollamaRes.status}`);
-      const errText = await ollamaRes.text().catch(() => '');
-      return res.status(ollamaRes.status).json({ error: { message: `Ollama error: ${errText}`, type: 'upstream_error' } });
-    }
-
-    keyStore.recordSuccess(keyObj.id);
     const data = await ollamaRes.json();
     return res.json(transformEmbeddingsResponse(data, openaiReq.model));
   } catch (e) {
     console.error('[/v1/embeddings] Error:', e.message);
-    return res.status(500).json({ error: { message: e.message, type: 'server_error' } });
+    return res.status(e.status || 500).json({ error: { message: e.message, type: 'server_error' } });
   }
 });
 
