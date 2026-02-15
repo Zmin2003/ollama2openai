@@ -204,11 +204,26 @@ export function transformModelsResponse(ollamaData) {
 }
 
 /**
+ * Estimate token count from text (rough: ~4 chars per token for English)
+ */
+function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+/**
  * Transform Ollama non-streaming chat response to OpenAI format
  */
-export function transformChatResponse(ollamaRes, model) {
+export function transformChatResponse(ollamaRes, model, requestMessages) {
   const chatId = generateChatId();
   const message = ollamaRes.message || {};
+  const content = message.content || '';
+
+  // Estimate tokens if not provided by Ollama (cloud API doesn't return these)
+  const promptTokens = ollamaRes.prompt_eval_count || estimateTokens(
+    requestMessages ? requestMessages.map(m => typeof m.content === 'string' ? m.content : '').join(' ') : ''
+  );
+  const completionTokens = ollamaRes.eval_count || estimateTokens(content);
 
   const openaiRes = {
     id: chatId,
@@ -219,14 +234,14 @@ export function transformChatResponse(ollamaRes, model) {
       index: 0,
       message: {
         role: message.role || 'assistant',
-        content: message.content || '',
+        content,
       },
       finish_reason: mapFinishReason(ollamaRes.done_reason, message.tool_calls),
     }],
     usage: {
-      prompt_tokens: ollamaRes.prompt_eval_count || 0,
-      completion_tokens: ollamaRes.eval_count || 0,
-      total_tokens: (ollamaRes.prompt_eval_count || 0) + (ollamaRes.eval_count || 0),
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
     },
     system_fingerprint: `fp_ollama_${(ollamaRes.model || '').replace(/[^a-z0-9]/g, '')}`,
   };
@@ -257,8 +272,9 @@ export function transformChatResponse(ollamaRes, model) {
 
 /**
  * Transform a single Ollama streaming chunk to OpenAI SSE chunk
+ * tokenCount: accumulated token count for estimation when Ollama doesn't provide counts
  */
-export function transformStreamChunk(ollamaChunk, chatId, created, model, isFirstChunk) {
+export function transformStreamChunk(ollamaChunk, chatId, created, model, isFirstChunk, tokenCount = 0) {
   const message = ollamaChunk.message || {};
   const content = message.content || '';
   const thinking = message.thinking || '';
@@ -314,9 +330,9 @@ export function transformStreamChunk(ollamaChunk, chatId, created, model, isFirs
 
     // Include usage in final chunk
     chunk.usage = {
-      prompt_tokens: ollamaChunk.prompt_eval_count || 0,
-      completion_tokens: ollamaChunk.eval_count || 0,
-      total_tokens: (ollamaChunk.prompt_eval_count || 0) + (ollamaChunk.eval_count || 0),
+      prompt_tokens: ollamaChunk.prompt_eval_count || tokenCount,
+      completion_tokens: ollamaChunk.eval_count || tokenCount,
+      total_tokens: (ollamaChunk.prompt_eval_count || tokenCount) + (ollamaChunk.eval_count || tokenCount),
     };
   }
 

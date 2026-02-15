@@ -3,6 +3,7 @@
  * Proxies requests to Ollama backends with round-robin key selection
  */
 import { Router } from 'express';
+import { Readable } from 'stream';
 import keyStore from '../core/keyStore.js';
 import {
   transformChatRequest, transformCompletionsRequest, transformEmbeddingsRequest,
@@ -38,8 +39,6 @@ async function proxyToOllama(keyObj, path, method, body, isStream = false) {
 
   const headers = {
     'Content-Type': 'application/json',
-    'Host': new URL(targetUrl).host,
-    'Origin': new URL(targetUrl).origin,
   };
 
   if (keyObj.key) {
@@ -57,6 +56,7 @@ async function proxyToOllama(keyObj, path, method, body, isStream = false) {
       method,
       headers,
       signal: controller.signal,
+      redirect: 'follow',
     };
 
     if (body && method !== 'GET') {
@@ -164,7 +164,7 @@ router.post('/v1/chat/completions', async (req, res) => {
     if (!isStream) {
       // Non-streaming response
       const data = await ollamaRes.json();
-      return res.json(transformChatResponse(data, openaiReq.model));
+      return res.json(transformChatResponse(data, openaiReq.model, openaiReq.messages));
     }
 
     // Streaming response - SSE
@@ -172,16 +172,18 @@ router.post('/v1/chat/completions', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
-    // Flush headers immediately so client knows connection is alive
     res.flushHeaders();
 
     const chatId = generateChatId();
     const created = Math.floor(Date.now() / 1000);
     let isFirstChunk = true;
     let buffer = '';
+    let tokenCount = 0;
 
-    const reader = ollamaRes.body;
-    reader.on('data', (chunk) => {
+    // Convert Web ReadableStream to Node.js Readable
+    const nodeStream = Readable.fromWeb(ollamaRes.body);
+
+    nodeStream.on('data', (chunk) => {
       buffer += chunk.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
@@ -190,8 +192,9 @@ router.post('/v1/chat/completions', async (req, res) => {
         if (!line.trim()) continue;
         try {
           const ollamaChunk = JSON.parse(line);
+          if (ollamaChunk.message?.content) tokenCount++;
           const openaiChunk = transformStreamChunk(
-            ollamaChunk, chatId, created, openaiReq.model, isFirstChunk
+            ollamaChunk, chatId, created, openaiReq.model, isFirstChunk, tokenCount
           );
           isFirstChunk = false;
           res.write(`data: ${JSON.stringify(openaiChunk)}\n\n`);
@@ -201,13 +204,13 @@ router.post('/v1/chat/completions', async (req, res) => {
       }
     });
 
-    reader.on('end', () => {
-      // Process remaining buffer
+    nodeStream.on('end', () => {
       if (buffer.trim()) {
         try {
           const ollamaChunk = JSON.parse(buffer);
+          if (ollamaChunk.message?.content) tokenCount++;
           const openaiChunk = transformStreamChunk(
-            ollamaChunk, chatId, created, openaiReq.model, isFirstChunk
+            ollamaChunk, chatId, created, openaiReq.model, isFirstChunk, tokenCount
           );
           res.write(`data: ${JSON.stringify(openaiChunk)}\n\n`);
         } catch (e) { /* skip */ }
@@ -216,7 +219,7 @@ router.post('/v1/chat/completions', async (req, res) => {
       res.end();
     });
 
-    reader.on('error', (e) => {
+    nodeStream.on('error', (e) => {
       console.error('[stream] Error:', e.message);
       if (!res.writableEnded) {
         res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'stream_error' } })}\n\n`);
@@ -225,9 +228,8 @@ router.post('/v1/chat/completions', async (req, res) => {
       }
     });
 
-    // Handle client disconnect
     req.on('close', () => {
-      if (!reader.destroyed) reader.destroy();
+      if (!nodeStream.destroyed) nodeStream.destroy();
     });
 
   } catch (e) {
@@ -270,8 +272,8 @@ router.post('/v1/completions', async (req, res) => {
     const created = Math.floor(Date.now() / 1000);
     let buffer = '';
 
-    const reader = ollamaRes.body;
-    reader.on('data', (chunk) => {
+    const nodeStream = Readable.fromWeb(ollamaRes.body);
+    nodeStream.on('data', (chunk) => {
       buffer += chunk.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
@@ -303,7 +305,7 @@ router.post('/v1/completions', async (req, res) => {
       }
     });
 
-    reader.on('end', () => {
+    nodeStream.on('end', () => {
       if (buffer.trim()) {
         try {
           const ollamaChunk = JSON.parse(buffer);
@@ -318,7 +320,7 @@ router.post('/v1/completions', async (req, res) => {
       res.end();
     });
 
-    reader.on('error', (e) => {
+    nodeStream.on('error', (e) => {
       if (!res.writableEnded) {
         res.write(`data: ${JSON.stringify({ error: { message: e.message, type: 'stream_error' } })}\n\n`);
         res.write('data: [DONE]\n\n');
@@ -326,7 +328,7 @@ router.post('/v1/completions', async (req, res) => {
       }
     });
 
-    req.on('close', () => { if (!reader.destroyed) reader.destroy(); });
+    req.on('close', () => { if (!nodeStream.destroyed) nodeStream.destroy(); });
 
   } catch (e) {
     console.error('[/v1/completions] Error:', e.message);
@@ -355,5 +357,30 @@ router.post('/v1/embeddings', async (req, res) => {
     return res.status(e.status || 500).json({ error: { message: e.message, type: 'server_error' } });
   }
 });
+
+// ============================================
+// Client compatibility routes
+// Many AI clients probe these endpoints
+// ============================================
+
+// GET /v1/models/:model - single model info (ChatBox, OpenCat)
+router.get('/v1/models/:model', async (req, res) => {
+  try {
+    const { res: ollamaRes } = await proxyWithRetry('/tags', 'GET', null, false);
+    const data = await ollamaRes.json();
+    const models = transformModelsResponse(data);
+    const model = models.data.find(m => m.id === req.params.model);
+    if (model) return res.json(model);
+    return res.status(404).json({ error: { message: `Model '${req.params.model}' not found`, type: 'not_found' } });
+  } catch (e) {
+    return res.status(e.status || 500).json({ error: { message: e.message, type: 'server_error' } });
+  }
+});
+
+// Aliases without /v1 prefix (some clients use these)
+router.post('/chat/completions', (req, res, next) => { req.url = '/v1/chat/completions'; next(); });
+router.post('/completions', (req, res, next) => { req.url = '/v1/completions'; next(); });
+router.post('/embeddings', (req, res, next) => { req.url = '/v1/embeddings'; next(); });
+router.get('/models', (req, res, next) => { req.url = '/v1/models'; next(); });
 
 export default router;
