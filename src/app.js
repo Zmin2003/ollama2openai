@@ -85,7 +85,7 @@ app.get('/', (req, res) => {
   const summary = keyStore.getSummary();
   res.json({
     service: 'Ollama2OpenAI',
-    version: '2.0.0',
+    version: '2.1.0',
     description: 'Ollama to OpenAI API proxy with key management',
     endpoints: {
       chat: '/v1/chat/completions',
@@ -152,7 +152,7 @@ app.listen(PORT, '0.0.0.0', () => {
   const cacheStats = cacheManager.getStats();
   console.log('');
   console.log('=============================================');
-  console.log('  Ollama2OpenAI v2.0.0');
+  console.log('  Ollama2OpenAI v2.1.0');
   console.log('=============================================');
   console.log(`  Server:     http://0.0.0.0:${PORT}`);
   console.log(`  API Base:   http://localhost:${PORT}/v1`);

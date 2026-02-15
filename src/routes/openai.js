@@ -423,9 +423,10 @@ router.post('/v1/embeddings', async (req, res) => {
 
     // Check cache first
     const cache = cacheManager.getEmbeddingsCache();
-    const cacheKey = LRUCache.generateKey(openaiReq.model, openaiReq.input);
+    let cacheKey = null;
     
     if (cache) {
+      cacheKey = LRUCache.generateKey(openaiReq.model, openaiReq.input);
       const cached = cache.get(cacheKey);
       if (cached) {
         if (LOG_LEVEL === 'debug') {
@@ -446,7 +447,7 @@ router.post('/v1/embeddings', async (req, res) => {
     const response = transformEmbeddingsResponse(data, openaiReq.model);
 
     // Store in cache
-    if (cache) {
+    if (cache && cacheKey) {
       cache.set(cacheKey, response);
     }
 

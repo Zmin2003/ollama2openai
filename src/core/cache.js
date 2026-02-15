@@ -25,14 +25,7 @@ class LRUCache {
    */
   static generateKey(model, input) {
     // Normalize input to string for hashing
-    let inputStr;
-    if (typeof input === 'string') {
-      inputStr = input;
-    } else if (Array.isArray(input)) {
-      inputStr = JSON.stringify(input);
-    } else {
-      inputStr = JSON.stringify(input);
-    }
+    const inputStr = typeof input === 'string' ? input : JSON.stringify(input);
     
     // Create hash for consistent key length
     const hash = crypto

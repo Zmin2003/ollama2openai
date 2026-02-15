@@ -4,6 +4,7 @@
 import { Router } from 'express';
 import { createHmac } from 'crypto';
 import keyStore from '../core/keyStore.js';
+import cacheManager from '../core/cache.js';
 
 const router = Router();
 
@@ -171,7 +172,6 @@ router.get('/api/stats', (req, res) => {
 // ============================================
 // GET /admin/api/cache - Cache stats
 // ============================================
-import cacheManager from '../core/cache.js';
 
 router.get('/api/cache', (req, res) => {
   res.json(cacheManager.getStats());
