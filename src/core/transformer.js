@@ -204,11 +204,20 @@ export function transformModelsResponse(ollamaData) {
 }
 
 /**
- * Estimate token count from text (rough: ~4 chars per token for English)
+ * Estimate token count from text
+ * Uses a heuristic that accounts for mixed CJK/English content:
+ * - CJK characters: ~1-2 chars per token (we use 1.5)
+ * - English/Latin: ~4 chars per token
  */
 function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(text.length / 4);
+
+  // Count CJK characters (Chinese, Japanese, Korean)
+  const cjkCount = (text.match(/[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g) || []).length;
+  const otherCount = text.length - cjkCount;
+
+  // CJK: ~1.5 chars/token, Other: ~4 chars/token
+  return Math.ceil(cjkCount / 1.5 + otherCount / 4);
 }
 
 /**
@@ -365,7 +374,18 @@ export function transformCompletionsResponse(ollamaRes, model) {
  * Transform Ollama embed response to OpenAI embeddings format
  */
 export function transformEmbeddingsResponse(ollamaRes, model) {
-  const embeddings = ollamaRes.embeddings || [ollamaRes.embedding] || [];
+  // BUG FIX: The original `ollamaRes.embeddings || [ollamaRes.embedding] || []`
+  // would create [undefined] when both are missing, because [undefined] is truthy.
+  // Correct logic: use embeddings array if present, otherwise wrap single embedding if present.
+  let embeddings;
+  if (Array.isArray(ollamaRes.embeddings) && ollamaRes.embeddings.length > 0) {
+    embeddings = ollamaRes.embeddings;
+  } else if (ollamaRes.embedding) {
+    embeddings = [ollamaRes.embedding];
+  } else {
+    embeddings = [];
+  }
+
   return {
     object: 'list',
     data: embeddings.map((emb, idx) => ({

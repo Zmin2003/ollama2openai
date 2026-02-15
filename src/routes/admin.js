@@ -2,28 +2,45 @@
  * Admin API routes - key management, health checks, monitoring
  */
 import { Router } from 'express';
+import { createHmac } from 'crypto';
 import keyStore from '../core/keyStore.js';
 
 const router = Router();
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
+/**
+ * Generate a session token from the admin password
+ * This avoids sending/storing the plaintext password as a token
+ */
+function generateSessionToken() {
+  return createHmac('sha256', 'ollama2openai-admin-salt')
+    .update(ADMIN_PASSWORD)
+    .digest('hex')
+    .substring(0, 32);
+}
+
+const SESSION_TOKEN = generateSessionToken();
+
 // Auth middleware for admin routes
 function adminAuth(req, res, next) {
-  // Check session cookie or Authorization header
   const authHeader = req.headers['authorization'];
   const cookieToken = req.cookies?.admin_token;
   const queryToken = req.query?.token;
-  const bodyToken = req.body?.password;
 
-  const token = authHeader?.replace('Bearer ', '') || cookieToken || queryToken;
+  let token;
+  if (authHeader) {
+    token = authHeader.startsWith('Bearer ') ? authHeader.substring(7).trim() : authHeader.trim();
+  }
+  token = token || cookieToken || queryToken;
 
   // Login endpoint doesn't need auth
   if (req.path === '/login' && req.method === 'POST') return next();
   // Serve admin page without auth (auth is handled client-side)
   if (req.path === '/' && req.method === 'GET') return next();
 
-  if (token === ADMIN_PASSWORD) return next();
+  // Accept either the session token or the raw password for backwards compatibility
+  if (token === SESSION_TOKEN || token === ADMIN_PASSWORD) return next();
 
   return res.status(401).json({ error: 'Unauthorized. Provide admin password.' });
 }
@@ -44,7 +61,8 @@ router.get('/', (req, res) => {
 router.post('/login', (req, res) => {
   const { password } = req.body;
   if (password === ADMIN_PASSWORD) {
-    return res.json({ success: true, token: ADMIN_PASSWORD });
+    // BUG FIX: Return a hashed session token instead of the plaintext password
+    return res.json({ success: true, token: SESSION_TOKEN });
   }
   return res.status(401).json({ error: 'Wrong password' });
 });

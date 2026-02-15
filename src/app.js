@@ -51,7 +51,17 @@ app.use('/v1', (req, res, next) => {
     return res.status(401).json({ error: { message: 'Missing Authorization header', type: 'auth_error' } });
   }
 
-  const token = authHeader.replace('Bearer ', '');
+  // BUG FIX: More robust Bearer token extraction
+  // Handle both "Bearer <token>" and raw "<token>" formats
+  let token;
+  if (authHeader.startsWith('Bearer ')) {
+    token = authHeader.substring(7).trim();
+  } else if (authHeader.startsWith('bearer ')) {
+    token = authHeader.substring(7).trim();
+  } else {
+    token = authHeader.trim();
+  }
+
   if (token !== API_TOKEN) {
     return res.status(401).json({ error: { message: 'Invalid API token', type: 'auth_error' } });
   }

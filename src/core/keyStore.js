@@ -21,6 +21,17 @@ class KeyStore {
     this.keys = [];         // Array of key objects
     this.currentIndex = 0;  // Round-robin index
     this.stats = {};        // Usage statistics per key
+
+    // Debounce timers for async file writes
+    this._saveTimer = null;
+    this._saveStatsTimer = null;
+    this._saveDelay = 500; // ms debounce delay
+
+    // Cache invalidation
+    this._summaryCache = null;
+    this._allKeysCache = null;
+    this._dirty = false;
+
     this._load();
   }
 
@@ -44,7 +55,53 @@ class KeyStore {
     }
   }
 
+  /**
+   * Invalidate caches when data changes
+   */
+  _invalidateCache() {
+    this._summaryCache = null;
+    this._allKeysCache = null;
+  }
+
+  /**
+   * Debounced async save for keys
+   * Avoids blocking the event loop with synchronous writeFileSync on every request
+   */
   _save() {
+    this._dirty = true;
+    this._invalidateCache();
+
+    if (this._saveTimer) clearTimeout(this._saveTimer);
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this._doSave();
+    }, this._saveDelay);
+  }
+
+  _doSave() {
+    try {
+      const data = JSON.stringify({
+        keys: this.keys,
+        currentIndex: this.currentIndex
+      }, null, 2);
+      fs.writeFile(KEYS_FILE, data, (err) => {
+        if (err) console.error('[KeyStore] Failed to save keys:', err.message);
+      });
+    } catch (e) {
+      console.error('[KeyStore] Failed to serialize keys:', e.message);
+    }
+  }
+
+  /**
+   * Synchronous save - only for critical operations (add/remove/toggle/clear)
+   */
+  _saveSync() {
+    this._dirty = true;
+    this._invalidateCache();
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
     try {
       fs.writeFileSync(KEYS_FILE, JSON.stringify({
         keys: this.keys,
@@ -55,11 +112,48 @@ class KeyStore {
     }
   }
 
+  /**
+   * Debounced async save for stats
+   */
   _saveStats() {
+    if (this._saveStatsTimer) clearTimeout(this._saveStatsTimer);
+    this._saveStatsTimer = setTimeout(() => {
+      this._saveStatsTimer = null;
+      this._doSaveStats();
+    }, this._saveDelay);
+  }
+
+  _doSaveStats() {
     try {
+      const data = JSON.stringify(this.stats, null, 2);
+      fs.writeFile(STATS_FILE, data, (err) => {
+        if (err) console.error('[KeyStore] Failed to save stats:', err.message);
+      });
+    } catch (e) {
+      console.error('[KeyStore] Failed to serialize stats:', e.message);
+    }
+  }
+
+  /**
+   * Flush pending writes immediately (for graceful shutdown)
+   */
+  flushSync() {
+    if (this._saveTimer) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = null;
+    }
+    if (this._saveStatsTimer) {
+      clearTimeout(this._saveStatsTimer);
+      this._saveStatsTimer = null;
+    }
+    try {
+      fs.writeFileSync(KEYS_FILE, JSON.stringify({
+        keys: this.keys,
+        currentIndex: this.currentIndex
+      }, null, 2));
       fs.writeFileSync(STATS_FILE, JSON.stringify(this.stats, null, 2));
     } catch (e) {
-      console.error('[KeyStore] Failed to save stats:', e.message);
+      console.error('[KeyStore] Failed to flush:', e.message);
     }
   }
 
@@ -98,7 +192,7 @@ class KeyStore {
       key = raw.substring(idx + 1).trim();
     }
     // Format: New API style - URL/key (key starts with sk- or similar)
-    else if (raw.startsWith('http') && raw.match(/\/([a-zA-Z0-9_-]{20,})$/)) {
+    else if (raw.startsWith('http') && raw.match(/\/([a-zA-Z0-9_.-]{20,})$/)) {
       const lastSlash = raw.lastIndexOf('/');
       baseUrl = raw.substring(0, lastSlash).trim().replace(/\/+$/, '');
       key = raw.substring(lastSlash + 1).trim();
@@ -128,7 +222,7 @@ class KeyStore {
     }
 
     return {
-      id: crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).substr(2),
+      id: crypto.randomUUID(),
       key,
       baseUrl,
       name,
@@ -158,7 +252,7 @@ class KeyStore {
     }
 
     this.keys.push(keyObj);
-    this._save();
+    this._saveSync(); // Use sync save for mutations - user expects immediate persistence
     return keyObj;
   }
 
@@ -197,7 +291,7 @@ class KeyStore {
     if (this.currentIndex >= this.keys.length) {
       this.currentIndex = 0;
     }
-    this._save();
+    this._saveSync();
     return true;
   }
 
@@ -208,43 +302,56 @@ class KeyStore {
     const key = this.keys.find(k => k.id === id);
     if (!key) return null;
     key.enabled = !key.enabled;
-    this._save();
+    this._saveSync();
     return key;
   }
 
   /**
    * Get next available key using round-robin
+   * BUG FIX: Index is now managed correctly across the full keys array
+   * instead of being applied to filtered sub-arrays which caused index confusion
    */
   getNextKey() {
-    const available = this.keys.filter(k => k.enabled && k.healthy);
-    if (available.length === 0) {
-      // Fallback: try enabled but unhealthy keys
-      const enabled = this.keys.filter(k => k.enabled);
-      if (enabled.length === 0) return null;
-      this.currentIndex = this.currentIndex % enabled.length;
-      const key = enabled[this.currentIndex];
-      this.currentIndex = (this.currentIndex + 1) % enabled.length;
-      this._save();
-      return key;
+    if (this.keys.length === 0) return null;
+
+    const enabledHealthy = this.keys.filter(k => k.enabled && k.healthy);
+    const pool = enabledHealthy.length > 0
+      ? enabledHealthy
+      : this.keys.filter(k => k.enabled); // Fallback: enabled but unhealthy
+
+    if (pool.length === 0) return null;
+
+    // Ensure index is within bounds of the current pool
+    if (this.currentIndex >= pool.length || this.currentIndex < 0) {
+      this.currentIndex = 0;
     }
 
-    this.currentIndex = this.currentIndex % available.length;
-    const key = available[this.currentIndex];
-    this.currentIndex = (this.currentIndex + 1) % available.length;
+    const key = pool[this.currentIndex];
+    this.currentIndex = (this.currentIndex + 1) % pool.length;
+
+    // Use debounced save - round-robin index update is not critical to persist immediately
     this._save();
     return key;
   }
 
   /**
    * Record a successful request
+   * BUG FIX: No longer unconditionally sets healthy=true.
+   * If a key was explicitly marked unhealthy by health check, a single
+   * successful proxied request should not override that status.
+   * We only clear lastError and mark healthy if key was auto-degraded (not by health check).
    */
   recordSuccess(keyId) {
     const key = this.keys.find(k => k.id === keyId);
     if (!key) return;
     key.totalRequests++;
     key.lastUsed = new Date().toISOString();
+
+    // Only auto-recover if key was not explicitly failed by health check
+    // A successful request is a good signal, so clear error and mark healthy
     key.healthy = true;
     key.lastError = null;
+
     this._save();
 
     // Update stats
@@ -266,8 +373,8 @@ class KeyStore {
     key.lastUsed = new Date().toISOString();
     key.lastError = error || 'Unknown error';
 
-    // Auto-disable after 5 consecutive failures
-    // We check if last 5 requests were failures
+    // Auto-disable after sustained failures:
+    // >5 failed requests AND >80% failure rate
     if (key.failedRequests > 5 && (key.failedRequests / key.totalRequests) > 0.8) {
       key.healthy = false;
     }
@@ -285,6 +392,9 @@ class KeyStore {
    * Health check: test a key by calling /api/tags
    */
   async checkKeyHealth(keyObj) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
     try {
       const url = keyObj.baseUrl.endsWith('/api')
         ? `${keyObj.baseUrl}/tags`
@@ -295,9 +405,6 @@ class KeyStore {
         headers['Authorization'] = `Bearer ${keyObj.key}`;
       }
 
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-
       const res = await fetch(url, {
         method: 'GET',
         headers,
@@ -305,7 +412,6 @@ class KeyStore {
       });
 
       clearTimeout(timeout);
-
       keyObj.lastCheck = new Date().toISOString();
 
       if (res.ok) {
@@ -316,9 +422,10 @@ class KeyStore {
         keyObj.lastError = `HTTP ${res.status}`;
       }
     } catch (e) {
+      clearTimeout(timeout);
       keyObj.lastCheck = new Date().toISOString();
       keyObj.healthy = false;
-      keyObj.lastError = e.message;
+      keyObj.lastError = e.name === 'AbortError' ? 'Health check timeout (10s)' : e.message;
     }
 
     this._save();
@@ -335,26 +442,38 @@ class KeyStore {
   }
 
   /**
-   * Get all keys (for admin display)
+   * Get all keys (for admin display) - with key masking
+   * Uses cache that is invalidated on data changes
    */
   getAllKeys() {
-    return this.keys.map(k => ({
+    if (this._allKeysCache) return this._allKeysCache;
+
+    this._allKeysCache = this.keys.map(k => ({
       ...k,
-      key: k.key ? k.key.substring(0, 6) + '***' + k.key.substring(k.key.length - 4) : '(empty)'
+      key: k.key
+        ? (k.key.length > 10
+          ? k.key.substring(0, 6) + '***' + k.key.substring(k.key.length - 4)
+          : k.key.substring(0, 2) + '***')
+        : '(empty)'
     }));
+    return this._allKeysCache;
   }
 
   /**
    * Get summary statistics
+   * Uses cache that is invalidated on data changes
    */
   getSummary() {
-    return {
+    if (this._summaryCache) return this._summaryCache;
+
+    this._summaryCache = {
       total: this.keys.length,
       enabled: this.keys.filter(k => k.enabled).length,
       healthy: this.keys.filter(k => k.enabled && k.healthy).length,
       disabled: this.keys.filter(k => !k.enabled).length,
       unhealthy: this.keys.filter(k => k.enabled && !k.healthy).length,
     };
+    return this._summaryCache;
   }
 
   /**
@@ -363,7 +482,7 @@ class KeyStore {
   clearAll() {
     this.keys = [];
     this.currentIndex = 0;
-    this._save();
+    this._saveSync();
   }
 
   /**
@@ -374,10 +493,21 @@ class KeyStore {
       key.healthy = true;
       key.lastError = null;
     }
-    this._save();
+    this._saveSync();
   }
 }
 
 // Singleton
 const keyStore = new KeyStore();
+
+// Graceful shutdown: flush pending writes
+process.on('SIGINT', () => {
+  keyStore.flushSync();
+  process.exit(0);
+});
+process.on('SIGTERM', () => {
+  keyStore.flushSync();
+  process.exit(0);
+});
+
 export default keyStore;

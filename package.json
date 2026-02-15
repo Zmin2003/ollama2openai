@@ -6,13 +6,14 @@
   "type": "module",
   "scripts": {
     "start": "node src/app.js",
-    "dev": "node --watch src/app.js"
+    "dev": "node --watch src/app.js",
+    "test": "node test/unit.test.js",
+    "bench": "node test/benchmark.js"
   },
   "dependencies": {
     "express": "^4.21.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "uuid": "^10.0.0"
+    "dotenv": "^16.4.5"
   },
   "engines": {
     "node": ">=18.0.0"
