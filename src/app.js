@@ -10,6 +10,7 @@ import cors from 'cors';
 import openaiRoutes from './routes/openai.js';
 import adminRoutes from './routes/admin.js';
 import keyStore from './core/keyStore.js';
+import cacheManager from './core/cache.js';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
@@ -148,6 +149,7 @@ if (HEALTH_CHECK_INTERVAL > 0) {
 // ============================================
 app.listen(PORT, '0.0.0.0', () => {
   const summary = keyStore.getSummary();
+  const cacheStats = cacheManager.getStats();
   console.log('');
   console.log('=============================================');
   console.log('  Ollama2OpenAI v2.0.0');
@@ -158,6 +160,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`  Keys:       ${summary.total} total, ${summary.healthy} healthy`);
   console.log(`  Auth:       ${API_TOKEN ? 'Enabled' : 'Disabled (set API_TOKEN in .env)'}`);
   console.log(`  HealthChk:  Every ${HEALTH_CHECK_INTERVAL / 1000}s`);
+  console.log(`  Cache:      Embeddings=${cacheStats.enabled.embeddings}, Chat=${cacheStats.enabled.chat}`);
   console.log('=============================================');
   console.log('');
 });

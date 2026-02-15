@@ -4,6 +4,7 @@
  */
 import { Router } from 'express';
 import keyStore from '../core/keyStore.js';
+import cacheManager, { LRUCache } from '../core/cache.js';
 import {
   transformChatRequest, transformCompletionsRequest, transformEmbeddingsRequest,
   transformModelsResponse, transformChatResponse, transformCompletionsResponse,
@@ -215,11 +216,43 @@ router.post('/v1/chat/completions', async (req, res) => {
     const ollamaReq = transformChatRequest(openaiReq);
     const isStream = ollamaReq.stream !== false;
 
+    // Check cache for non-streaming chat requests
+    const cache = cacheManager.getChatCache();
+    let cacheKey = null;
+    
+    if (cache && !isStream) {
+      cacheKey = LRUCache.generateChatKey(openaiReq.model, openaiReq.messages, {
+        temperature: openaiReq.temperature,
+        top_p: openaiReq.top_p,
+        max_tokens: openaiReq.max_tokens,
+        response_format: openaiReq.response_format,
+        tools: openaiReq.tools,
+      });
+      
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        if (LOG_LEVEL === 'debug') {
+          console.log('[/v1/chat/completions] Cache HIT for model:', openaiReq.model);
+        }
+        return res.json({ ...cached, cached: true });
+      }
+      if (LOG_LEVEL === 'debug') {
+        console.log('[/v1/chat/completions] Cache MISS for model:', openaiReq.model);
+      }
+    }
+
     const { res: ollamaRes, keyObj } = await proxyWithRetry('/chat', 'POST', ollamaReq, isStream);
 
     if (!isStream) {
       const data = await ollamaRes.json();
-      return res.json(transformChatResponse(data, openaiReq.model, openaiReq.messages));
+      const response = transformChatResponse(data, openaiReq.model, openaiReq.messages);
+      
+      // Cache the response
+      if (cache && cacheKey) {
+        cache.set(cacheKey, response);
+      }
+      
+      return res.json(response);
     }
 
     // Streaming response - SSE
@@ -388,11 +421,36 @@ router.post('/v1/embeddings', async (req, res) => {
       return res.status(400).json({ error: { message: 'model is required', type: 'invalid_request_error' } });
     }
 
+    // Check cache first
+    const cache = cacheManager.getEmbeddingsCache();
+    const cacheKey = LRUCache.generateKey(openaiReq.model, openaiReq.input);
+    
+    if (cache) {
+      const cached = cache.get(cacheKey);
+      if (cached) {
+        if (LOG_LEVEL === 'debug') {
+          console.log('[/v1/embeddings] Cache HIT for model:', openaiReq.model);
+        }
+        // Return cached response with cache indicator
+        return res.json({ ...cached, cached: true });
+      }
+      if (LOG_LEVEL === 'debug') {
+        console.log('[/v1/embeddings] Cache MISS for model:', openaiReq.model);
+      }
+    }
+
     const ollamaReq = transformEmbeddingsRequest(openaiReq);
     const { res: ollamaRes } = await proxyWithRetry('/embed', 'POST', ollamaReq, false);
 
     const data = await ollamaRes.json();
-    return res.json(transformEmbeddingsResponse(data, openaiReq.model));
+    const response = transformEmbeddingsResponse(data, openaiReq.model);
+
+    // Store in cache
+    if (cache) {
+      cache.set(cacheKey, response);
+    }
+
+    return res.json(response);
   } catch (e) {
     console.error('[/v1/embeddings] Error:', e.message);
     return res.status(e.status || 500).json({ error: { message: e.message, type: 'server_error' } });

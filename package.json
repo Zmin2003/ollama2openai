@@ -1,14 +1,15 @@
 {
   "name": "ollama2openai",
-  "version": "2.0.0",
-  "description": "Ollama to OpenAI API proxy with key management, round-robin load balancing, health checks, and admin panel",
+  "version": "2.1.0",
+  "description": "Ollama to OpenAI API proxy with key management, round-robin load balancing, health checks, caching, and admin panel",
   "main": "src/app.js",
   "type": "module",
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --watch src/app.js",
     "test": "node test/unit.test.js",
-    "bench": "node test/benchmark.js"
+    "bench": "node test/benchmark.js",
+    "bench:cache": "node test/cache.benchmark.js"
   },
   "dependencies": {
     "express": "^4.21.0",

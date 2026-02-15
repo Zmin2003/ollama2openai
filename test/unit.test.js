@@ -16,6 +16,7 @@ import {
   transformEmbeddingsResponse,
   transformStreamChunk,
 } from '../src/core/transformer.js';
+import { LRUCache, CacheManager } from '../src/core/cache.js';
 
 let passed = 0;
 let failed = 0;
@@ -453,6 +454,93 @@ test('tool_calls with non-string arguments', () => {
   const result = transformChatRequest(req);
   // Object arguments should be kept as-is (already parsed)
   assert.deepEqual(result.messages[0].tool_calls[0].function.arguments, { key: 'value' });
+});
+
+// ============================================
+// Cache Tests
+// ============================================
+section('LRUCache');
+
+test('LRU cache basic set/get', () => {
+  const cache = new LRUCache(100, 60000);
+  cache.set('key1', 'value1');
+  assert.equal(cache.get('key1'), 'value1');
+  assert.equal(cache.size, 1);
+});
+
+test('LRU cache returns null for missing key', () => {
+  const cache = new LRUCache(100, 60000);
+  assert.equal(cache.get('missing'), null);
+  assert.equal(cache.has('missing'), false);
+});
+
+test('LRU cache expiration', async () => {
+  const cache = new LRUCache(100, 100); // 100ms TTL
+  cache.set('key1', 'value1');
+  assert.equal(cache.get('key1'), 'value1');
+  await new Promise(r => setTimeout(r, 150));
+  assert.equal(cache.get('key1'), null);
+});
+
+test('LRU cache eviction at maxSize', () => {
+  const cache = new LRUCache(3, 60000);
+  cache.set('a', 1);
+  cache.set('b', 2);
+  cache.set('c', 3);
+  cache.set('d', 4); // Should evict 'a'
+  assert.equal(cache.get('a'), null);
+  assert.equal(cache.get('b'), 2);
+  assert.equal(cache.get('c'), 3);
+  assert.equal(cache.get('d'), 4);
+});
+
+test('LRU cache generates consistent keys', () => {
+  const key1 = LRUCache.generateKey('model-a', 'input text');
+  const key2 = LRUCache.generateKey('model-a', 'input text');
+  const key3 = LRUCache.generateKey('model-b', 'input text');
+  assert.equal(key1, key2);
+  assert.notEqual(key1, key3);
+  assert.ok(key1.length === 64); // SHA-256 hex length
+});
+
+test('LRU cache generates chat keys', () => {
+  const messages = [{ role: 'user', content: 'Hello' }];
+  const key1 = LRUCache.generateChatKey('llama3', messages, { temperature: 0.7 });
+  const key2 = LRUCache.generateChatKey('llama3', messages, { temperature: 0.7 });
+  const key3 = LRUCache.generateChatKey('llama3', messages, { temperature: 1.0 });
+  assert.equal(key1, key2);
+  assert.notEqual(key1, key3);
+});
+
+test('LRU cache stats', () => {
+  const cache = new LRUCache(100, 60000);
+  cache.set('a', 1);
+  cache.get('a'); // hit
+  cache.get('b'); // miss
+  cache.get('a'); // hit
+  const stats = cache.getStats();
+  assert.equal(stats.hits, 2);
+  assert.equal(stats.misses, 1);
+  assert.equal(stats.size, 1);
+});
+
+test('LRU cache clear', () => {
+  const cache = new LRUCache(100, 60000);
+  cache.set('a', 1);
+  cache.set('b', 2);
+  cache.clear();
+  assert.equal(cache.size, 0);
+  assert.equal(cache.get('a'), null);
+});
+
+test('LRU cache cleanup removes expired', async () => {
+  const cache = new LRUCache(100, 50); // 50ms TTL
+  cache.set('a', 1);
+  cache.set('b', 2);
+  await new Promise(r => setTimeout(r, 100));
+  const cleaned = cache.cleanup();
+  assert.ok(cleaned >= 2);
+  assert.equal(cache.size, 0);
 });
 
 // ============================================

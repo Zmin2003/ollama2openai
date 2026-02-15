@@ -169,6 +169,23 @@ router.get('/api/stats', (req, res) => {
 });
 
 // ============================================
+// GET /admin/api/cache - Cache stats
+// ============================================
+import cacheManager from '../core/cache.js';
+
+router.get('/api/cache', (req, res) => {
+  res.json(cacheManager.getStats());
+});
+
+// ============================================
+// DELETE /admin/api/cache - Clear cache
+// ============================================
+router.delete('/api/cache', (req, res) => {
+  cacheManager.clearAll();
+  res.json({ success: true, message: 'All caches cleared' });
+});
+
+// ============================================
 // Admin Panel HTML (embedded)
 // ============================================
 function getAdminHTML() {
