@@ -1,0 +1,17 @@
+services:
+  ollama2openai:
+    build: .
+    container_name: ollama2openai
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=3000
+      - ADMIN_PASSWORD=admin123
+      - API_TOKEN=
+      - OLLAMA_BASE_URL=https://ollama.com/api
+      - HEALTH_CHECK_INTERVAL=60
+      - REQUEST_TIMEOUT=120000
+      - LOG_LEVEL=info

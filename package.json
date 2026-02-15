@@ -1,0 +1,21 @@
+{
+  "name": "ollama2openai",
+  "version": "2.0.0",
+  "description": "Ollama to OpenAI API proxy with key management, round-robin load balancing, health checks, and admin panel",
+  "main": "src/app.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node --watch src/app.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "uuid": "^10.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
