@@ -13,5 +13,7 @@ services:
       - API_TOKEN=
       - OLLAMA_BASE_URL=https://ollama.com/api
       - HEALTH_CHECK_INTERVAL=60
-      - REQUEST_TIMEOUT=120000
+      - CONNECT_TIMEOUT=30000
+      - REQUEST_TIMEOUT=300000
+      - MAX_RETRIES=2
       - LOG_LEVEL=info

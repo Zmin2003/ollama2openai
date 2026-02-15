@@ -403,6 +403,15 @@ router.post('/v1/embeddings', async (req, res) => {
 // Client compatibility routes
 // ============================================
 
+// GET /v1 - connection test endpoint (ChatBox, OpenCat, etc.)
+router.get('/v1', (req, res) => {
+  res.json({
+    object: 'list',
+    data: [],
+    message: 'Ollama2OpenAI API is running',
+  });
+});
+
 // GET /v1/models/:model - single model info (ChatBox, OpenCat)
 router.get('/v1/models/:model', async (req, res) => {
   try {
