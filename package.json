@@ -1,7 +1,7 @@
 {
   "name": "ollama2openai",
-  "version": "2.2.0",
-  "description": "Ollama to OpenAI API proxy with key management, round-robin load balancing, health checks, caching, and admin panel",
+  "version": "3.0.0",
+  "description": "Ollama to OpenAI API proxy - Enterprise Edition with weighted load balancing, channel routing, multi-token auth, rate limiting, IP access control, Prometheus metrics, structured logging, and admin panel",
   "main": "src/app.js",
   "type": "module",
   "scripts": {

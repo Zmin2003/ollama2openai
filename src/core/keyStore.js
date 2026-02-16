@@ -252,6 +252,14 @@ class KeyStore {
       addedAt: new Date().toISOString(),
       totalRequests: 0,
       failedRequests: 0,
+      totalTokens: 0,
+      weight: 10,
+      priority: 0,
+      maxConcurrent: 0,
+      currentConcurrent: 0,
+      group: '',
+      models: [],
+      modelMapping: {},
       tags: []
     };
   }
@@ -341,35 +349,74 @@ class KeyStore {
   }
 
   /**
-   * Get next available key using round-robin
-   * BUG FIX: Index is now managed correctly across the full keys array
-   * instead of being applied to filtered sub-arrays which caused index confusion
+   * Get next available key using weighted load balancing
+   * Strategy: priority-based selection, then weighted random within same priority tier
+   * Falls back to round-robin if all weights are equal
    */
-  getNextKey() {
+  getNextKey(model) {
     if (this.keys.length === 0) return null;
 
     // Use cached pool to avoid filtering on every request
     if (!this._poolCache) {
-      const enabledHealthy = this.keys.filter(k => k.enabled && k.healthy);
-      this._poolCache = enabledHealthy.length > 0
-        ? enabledHealthy
-        : this.keys.filter(k => k.enabled); // Fallback: enabled but unhealthy
+      let enabledHealthy = this.keys.filter(k => k.enabled && k.healthy);
+      if (enabledHealthy.length === 0) {
+        enabledHealthy = this.keys.filter(k => k.enabled); // Fallback
+      }
+      this._poolCache = enabledHealthy;
     }
 
-    const pool = this._poolCache;
+    let pool = this._poolCache;
     if (pool.length === 0) return null;
 
-    // Ensure index is within bounds of the current pool
-    if (this.currentIndex >= pool.length || this.currentIndex < 0) {
-      this.currentIndex = 0;
+    // Filter by model if specified
+    if (model) {
+      const modelPool = pool.filter(k => {
+        if (!k.models || k.models.length === 0) return true;
+        return k.models.some(m => {
+          if (m.includes('*')) return new RegExp('^' + m.replace(/\*/g, '.*') + '$').test(model);
+          return m === model;
+        }) || Object.keys(k.modelMapping || {}).includes(model);
+      });
+      if (modelPool.length > 0) pool = modelPool;
     }
 
-    const key = pool[this.currentIndex];
-    this.currentIndex = (this.currentIndex + 1) % pool.length;
+    // Check concurrency limits
+    const available = pool.filter(k => {
+      if (k.maxConcurrent > 0 && k.currentConcurrent >= k.maxConcurrent) return false;
+      return true;
+    });
+    if (available.length > 0) pool = available;
 
-    // Use debounced save - round-robin index update is not critical to persist immediately
+    // Sort by priority (highest first)
+    pool.sort((a, b) => (b.priority || 0) - (a.priority || 0));
+
+    // Get highest priority tier
+    const topPriority = pool[0].priority || 0;
+    const topTier = pool.filter(k => (k.priority || 0) === topPriority);
+
+    let selected;
+    // Check if all weights are equal (use round-robin in that case)
+    const allSameWeight = topTier.every(k => (k.weight || 10) === (topTier[0].weight || 10));
+    if (allSameWeight) {
+      // Classic round-robin
+      if (this.currentIndex >= topTier.length || this.currentIndex < 0) {
+        this.currentIndex = 0;
+      }
+      selected = topTier[this.currentIndex];
+      this.currentIndex = (this.currentIndex + 1) % topTier.length;
+    } else {
+      // Weighted random selection
+      const totalWeight = topTier.reduce((sum, k) => sum + (k.weight || 10), 0);
+      let random = Math.random() * totalWeight;
+      selected = topTier[0];
+      for (const k of topTier) {
+        random -= (k.weight || 10);
+        if (random <= 0) { selected = k; break; }
+      }
+    }
+
     this._save();
-    return key;
+    return selected;
   }
 
   /**
@@ -379,11 +426,13 @@ class KeyStore {
    * successful proxied request should not override that status.
    * We only clear lastError and mark healthy if key was auto-degraded (not by health check).
    */
-  recordSuccess(keyId) {
+  recordSuccess(keyId, tokens = 0) {
     const key = this._keyIndex.get(keyId);
     if (!key) return;
     key.totalRequests++;
+    key.totalTokens = (key.totalTokens || 0) + tokens;
     key.lastUsed = new Date().toISOString();
+    if (key.currentConcurrent > 0) key.currentConcurrent--;
 
     // Only auto-recover if key was not explicitly failed by health check
     // A successful request is a good signal, so clear error and mark healthy
@@ -395,8 +444,9 @@ class KeyStore {
     // Update stats
     const today = new Date().toISOString().split('T')[0];
     if (!this.stats[today]) this.stats[today] = {};
-    if (!this.stats[today][keyId]) this.stats[today][keyId] = { success: 0, fail: 0 };
+    if (!this.stats[today][keyId]) this.stats[today][keyId] = { success: 0, fail: 0, tokens: 0 };
     this.stats[today][keyId].success++;
+    this.stats[today][keyId].tokens = (this.stats[today][keyId].tokens || 0) + tokens;
     this._saveStats();
   }
 
@@ -410,6 +460,7 @@ class KeyStore {
     key.failedRequests++;
     key.lastUsed = new Date().toISOString();
     key.lastError = error || 'Unknown error';
+    if (key.currentConcurrent > 0) key.currentConcurrent--;
 
     // Auto-disable after sustained failures:
     // >5 failed requests AND >80% failure rate
@@ -504,9 +555,11 @@ class KeyStore {
   getSummary() {
     if (this._summaryCache) return this._summaryCache;
 
-    // PERF: Single-pass computation instead of 4 separate filter() calls
-    let enabled = 0, healthy = 0, disabled = 0, unhealthy = 0;
+    // PERF: Single-pass computation
+    let enabled = 0, healthy = 0, disabled = 0, unhealthy = 0, totalRequests = 0, totalTokens = 0;
     for (const k of this.keys) {
+      totalRequests += k.totalRequests || 0;
+      totalTokens += k.totalTokens || 0;
       if (k.enabled) {
         enabled++;
         if (k.healthy) healthy++;
@@ -522,8 +575,28 @@ class KeyStore {
       healthy,
       disabled,
       unhealthy,
+      totalRequests,
+      totalTokens,
     };
     return this._summaryCache;
+  }
+
+  /**
+   * Acquire concurrency slot
+   */
+  acquireConcurrency(keyId) {
+    const key = this._keyIndex.get(keyId);
+    if (key) key.currentConcurrent = (key.currentConcurrent || 0) + 1;
+  }
+
+  /**
+   * Resolve model name through key's model mapping
+   */
+  resolveModel(keyObj, requestedModel) {
+    if (keyObj.modelMapping && keyObj.modelMapping[requestedModel]) {
+      return keyObj.modelMapping[requestedModel];
+    }
+    return requestedModel;
   }
 
   /**
