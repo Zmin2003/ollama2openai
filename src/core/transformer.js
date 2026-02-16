@@ -338,10 +338,14 @@ export function transformStreamChunk(ollamaChunk, chatId, created, model, isFirs
     chunk.choices[0].finish_reason = mapFinishReason(doneReason, toolCalls);
 
     // Include usage in final chunk
+    // BUG FIX: tokenCount tracks content chunks (completion side only),
+    // so it should NOT be used as fallback for prompt_tokens
+    const promptTokens = ollamaChunk.prompt_eval_count || 0;
+    const completionTokens = ollamaChunk.eval_count || tokenCount;
     chunk.usage = {
-      prompt_tokens: ollamaChunk.prompt_eval_count || tokenCount,
-      completion_tokens: ollamaChunk.eval_count || tokenCount,
-      total_tokens: (ollamaChunk.prompt_eval_count || tokenCount) + (ollamaChunk.eval_count || tokenCount),
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
     };
   }
 

@@ -544,6 +544,108 @@ test('LRU cache cleanup removes expired', async () => {
 });
 
 // ============================================
+// BUG FIX: Stream token estimation
+// ============================================
+section('Stream Token Estimation (BUG FIX)');
+
+test('done chunk uses 0 for prompt_tokens when not provided (not tokenCount)', () => {
+  const chunk = {
+    message: { content: '' },
+    done: true,
+    done_reason: 'stop',
+    // No prompt_eval_count or eval_count provided
+  };
+  const tokenCount = 15; // Accumulated content chunk count
+  const result = transformStreamChunk(chunk, 'chatcmpl-123', 1700000000, 'llama3', false, tokenCount);
+  // BUG FIX: prompt_tokens should be 0, not tokenCount
+  assert.equal(result.usage.prompt_tokens, 0);
+  // completion_tokens can use tokenCount as fallback
+  assert.equal(result.usage.completion_tokens, tokenCount);
+  assert.equal(result.usage.total_tokens, tokenCount);
+});
+
+test('done chunk uses actual counts when provided by Ollama', () => {
+  const chunk = {
+    message: { content: '' },
+    done: true,
+    done_reason: 'stop',
+    prompt_eval_count: 25,
+    eval_count: 30,
+  };
+  const result = transformStreamChunk(chunk, 'chatcmpl-123', 1700000000, 'llama3', false, 10);
+  assert.equal(result.usage.prompt_tokens, 25);
+  assert.equal(result.usage.completion_tokens, 30);
+  assert.equal(result.usage.total_tokens, 55);
+});
+
+// ============================================
+// Additional edge cases
+// ============================================
+section('Additional Edge Cases');
+
+test('multimodal with multiple images', () => {
+  const req = {
+    model: 'llava',
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Compare these images' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,abc123' } },
+        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,def456' } },
+        { type: 'text', text: 'What are the differences?' },
+      ]
+    }],
+  };
+  const result = transformChatRequest(req);
+  assert.equal(result.messages[0].content, 'Compare these images\nWhat are the differences?');
+  assert.equal(result.messages[0].images.length, 2);
+  assert.equal(result.messages[0].images[0], 'abc123');
+  assert.equal(result.messages[0].images[1], 'def456');
+});
+
+test('keep_alive pass-through', () => {
+  const req = { model: 'llama3', messages: [], keep_alive: '10m' };
+  const result = transformChatRequest(req);
+  assert.equal(result.keep_alive, '10m');
+});
+
+test('completions response with done=false sets length finish_reason', () => {
+  const ollamaRes = {
+    model: 'llama3',
+    response: 'partial output',
+    done: false,
+    prompt_eval_count: 5,
+    eval_count: 4,
+  };
+  const result = transformCompletionsResponse(ollamaRes, 'llama3');
+  assert.equal(result.choices[0].finish_reason, 'length');
+});
+
+test('stream chunk with tool_calls', () => {
+  const chunk = {
+    message: {
+      content: '',
+      tool_calls: [{
+        function: { name: 'get_weather', arguments: { city: 'NYC' } }
+      }]
+    },
+    done: false,
+  };
+  const result = transformStreamChunk(chunk, 'chatcmpl-123', 1700000000, 'llama3', false);
+  assert.equal(result.choices[0].delta.tool_calls.length, 1);
+  assert.equal(result.choices[0].delta.tool_calls[0].function.name, 'get_weather');
+  assert.equal(result.choices[0].delta.tool_calls[0].function.arguments, '{"city":"NYC"}');
+});
+
+test('models response uses model field as fallback for id', () => {
+  const ollamaData = {
+    models: [{ model: 'custom-model', modified_at: '2024-01-01T00:00:00Z' }]
+  };
+  const result = transformModelsResponse(ollamaData);
+  assert.equal(result.data[0].id, 'custom-model');
+});
+
+// ============================================
 // Summary
 // ============================================
 console.log(`\n=============================================`);

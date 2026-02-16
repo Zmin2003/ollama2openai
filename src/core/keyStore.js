@@ -7,6 +7,9 @@ const DATA_DIR = path.join(__dirname, '..', '..', 'data');
 const KEYS_FILE = path.join(DATA_DIR, 'keys.json');
 const STATS_FILE = path.join(DATA_DIR, 'stats.json');
 
+// Max days to retain stats before auto-cleanup
+const STATS_RETENTION_DAYS = 30;
+
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -19,6 +22,7 @@ if (!fs.existsSync(DATA_DIR)) {
 class KeyStore {
   constructor() {
     this.keys = [];         // Array of key objects
+    this._keyIndex = new Map(); // id -> key object for O(1) lookup
     this.currentIndex = 0;  // Round-robin index
     this.stats = {};        // Usage statistics per key
 
@@ -30,9 +34,12 @@ class KeyStore {
     // Cache invalidation
     this._summaryCache = null;
     this._allKeysCache = null;
+    this._poolCache = null; // Cached healthy/enabled pool
     this._dirty = false;
 
     this._load();
+    this._rebuildIndex();
+    this._cleanupOldStats();
   }
 
   _load() {
@@ -56,11 +63,22 @@ class KeyStore {
   }
 
   /**
+   * Rebuild the key index map for O(1) lookups
+   */
+  _rebuildIndex() {
+    this._keyIndex.clear();
+    for (const key of this.keys) {
+      this._keyIndex.set(key.id, key);
+    }
+  }
+
+  /**
    * Invalidate caches when data changes
    */
   _invalidateCache() {
     this._summaryCache = null;
     this._allKeysCache = null;
+    this._poolCache = null;
   }
 
   /**
@@ -252,30 +270,45 @@ class KeyStore {
     }
 
     this.keys.push(keyObj);
+    this._keyIndex.set(keyObj.id, keyObj);
     this._saveSync(); // Use sync save for mutations - user expects immediate persistence
     return keyObj;
   }
 
   /**
    * Batch import keys (newline or comma separated)
+   * BUG FIX: Previously called addKey() per line which did _saveSync() each time,
+   * causing N synchronous file writes. Now batches all additions and writes once.
    */
   batchImport(text, defaultBaseUrl) {
-    const lines = text.split(/[\n,;]+/).map(l => l.trim()).filter(Boolean);
+    const lines = text.split(/[\n,;]+/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
     const results = { added: [], duplicates: [], errors: [] };
 
     for (const line of lines) {
       try {
-        const keyObj = this.addKey(line, defaultBaseUrl);
+        const keyObj = this.parseKeyString(line, defaultBaseUrl);
         if (!keyObj) {
           results.errors.push({ input: line, error: 'Invalid format' });
-        } else if (keyObj.duplicate) {
-          results.duplicates.push(keyObj);
+          continue;
+        }
+
+        // Check for duplicates against existing keys AND newly added keys
+        const existing = this.keys.find(k => k.key === keyObj.key && k.baseUrl === keyObj.baseUrl);
+        if (existing) {
+          results.duplicates.push({ ...existing, duplicate: true });
         } else {
+          this.keys.push(keyObj);
+          this._keyIndex.set(keyObj.id, keyObj);
           results.added.push(keyObj);
         }
       } catch (e) {
         results.errors.push({ input: line, error: e.message });
       }
+    }
+
+    // Single write for all additions
+    if (results.added.length > 0) {
+      this._saveSync();
     }
 
     return results;
@@ -288,6 +321,7 @@ class KeyStore {
     const idx = this.keys.findIndex(k => k.id === id);
     if (idx === -1) return false;
     this.keys.splice(idx, 1);
+    this._keyIndex.delete(id);
     if (this.currentIndex >= this.keys.length) {
       this.currentIndex = 0;
     }
@@ -299,7 +333,7 @@ class KeyStore {
    * Toggle key enabled/disabled
    */
   toggleKey(id) {
-    const key = this.keys.find(k => k.id === id);
+    const key = this._keyIndex.get(id);
     if (!key) return null;
     key.enabled = !key.enabled;
     this._saveSync();
@@ -314,11 +348,15 @@ class KeyStore {
   getNextKey() {
     if (this.keys.length === 0) return null;
 
-    const enabledHealthy = this.keys.filter(k => k.enabled && k.healthy);
-    const pool = enabledHealthy.length > 0
-      ? enabledHealthy
-      : this.keys.filter(k => k.enabled); // Fallback: enabled but unhealthy
+    // Use cached pool to avoid filtering on every request
+    if (!this._poolCache) {
+      const enabledHealthy = this.keys.filter(k => k.enabled && k.healthy);
+      this._poolCache = enabledHealthy.length > 0
+        ? enabledHealthy
+        : this.keys.filter(k => k.enabled); // Fallback: enabled but unhealthy
+    }
 
+    const pool = this._poolCache;
     if (pool.length === 0) return null;
 
     // Ensure index is within bounds of the current pool
@@ -342,7 +380,7 @@ class KeyStore {
    * We only clear lastError and mark healthy if key was auto-degraded (not by health check).
    */
   recordSuccess(keyId) {
-    const key = this.keys.find(k => k.id === keyId);
+    const key = this._keyIndex.get(keyId);
     if (!key) return;
     key.totalRequests++;
     key.lastUsed = new Date().toISOString();
@@ -366,7 +404,7 @@ class KeyStore {
    * Record a failed request
    */
   recordFailure(keyId, error) {
-    const key = this.keys.find(k => k.id === keyId);
+    const key = this._keyIndex.get(keyId);
     if (!key) return;
     key.totalRequests++;
     key.failedRequests++;
@@ -466,12 +504,24 @@ class KeyStore {
   getSummary() {
     if (this._summaryCache) return this._summaryCache;
 
+    // PERF: Single-pass computation instead of 4 separate filter() calls
+    let enabled = 0, healthy = 0, disabled = 0, unhealthy = 0;
+    for (const k of this.keys) {
+      if (k.enabled) {
+        enabled++;
+        if (k.healthy) healthy++;
+        else unhealthy++;
+      } else {
+        disabled++;
+      }
+    }
+
     this._summaryCache = {
       total: this.keys.length,
-      enabled: this.keys.filter(k => k.enabled).length,
-      healthy: this.keys.filter(k => k.enabled && k.healthy).length,
-      disabled: this.keys.filter(k => !k.enabled).length,
-      unhealthy: this.keys.filter(k => k.enabled && !k.healthy).length,
+      enabled,
+      healthy,
+      disabled,
+      unhealthy,
     };
     return this._summaryCache;
   }
@@ -481,6 +531,7 @@ class KeyStore {
    */
   clearAll() {
     this.keys = [];
+    this._keyIndex.clear();
     this.currentIndex = 0;
     this._saveSync();
   }
@@ -495,19 +546,38 @@ class KeyStore {
     }
     this._saveSync();
   }
+
+  /**
+   * Clean up stats older than STATS_RETENTION_DAYS to prevent unbounded growth
+   */
+  _cleanupOldStats() {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - STATS_RETENTION_DAYS);
+    const cutoffStr = cutoff.toISOString().split('T')[0];
+
+    let cleaned = 0;
+    for (const date of Object.keys(this.stats)) {
+      if (date < cutoffStr) {
+        delete this.stats[date];
+        cleaned++;
+      }
+    }
+
+    if (cleaned > 0) {
+      console.log(`[KeyStore] Cleaned up ${cleaned} old stats entries (>${STATS_RETENTION_DAYS} days)`);
+      this._doSaveStats();
+    }
+  }
+
+  /**
+   * Get a key by ID using O(1) Map lookup
+   */
+  getKeyById(id) {
+    return this._keyIndex.get(id) || null;
+  }
 }
 
 // Singleton
 const keyStore = new KeyStore();
-
-// Graceful shutdown: flush pending writes
-process.on('SIGINT', () => {
-  keyStore.flushSync();
-  process.exit(0);
-});
-process.on('SIGTERM', () => {
-  keyStore.flushSync();
-  process.exit(0);
-});
 
 export default keyStore;

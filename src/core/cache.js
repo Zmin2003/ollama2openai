@@ -195,10 +195,12 @@ class CacheManager {
     );
 
     // Periodic cleanup (every 10 minutes)
+    // Use unref() so this timer doesn't prevent graceful process exit
     this._cleanupInterval = setInterval(() => {
       this.embeddingsCache.cleanup();
       this.chatCache.cleanup();
     }, 600000);
+    this._cleanupInterval.unref();
   }
 
   /**
@@ -223,6 +225,7 @@ class CacheManager {
       enabled: this.enabled,
       embeddings: this.embeddingsCache.getStats(),
       chat: this.chatCache.getStats(),
+      totalItems: this.embeddingsCache.size + this.chatCache.size,
     };
   }
 
@@ -247,13 +250,8 @@ class CacheManager {
 // Singleton
 const cacheManager = new CacheManager();
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-  cacheManager.shutdown();
-});
-process.on('SIGTERM', () => {
-  cacheManager.shutdown();
-});
+// NOTE: Graceful shutdown is handled centrally in app.js
+// which calls cacheManager.shutdown()
 
 export { LRUCache, CacheManager };
 export default cacheManager;

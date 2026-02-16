@@ -1,6 +1,6 @@
 {
   "name": "ollama2openai",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Ollama to OpenAI API proxy with key management, round-robin load balancing, health checks, caching, and admin panel",
   "main": "src/app.js",
   "type": "module",

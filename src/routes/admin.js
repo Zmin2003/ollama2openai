@@ -23,17 +23,29 @@ function generateSessionToken() {
 
 const SESSION_TOKEN = generateSessionToken();
 
+/**
+ * Helper: consistently mask a key for display
+ */
+function maskKey(key) {
+  if (!key) return '(empty)';
+  if (key.length > 10) return key.substring(0, 6) + '***' + key.substring(key.length - 4);
+  if (key.length > 4) return key.substring(0, 2) + '***';
+  return '***';
+}
+
 // Auth middleware for admin routes
 function adminAuth(req, res, next) {
   const authHeader = req.headers['authorization'];
-  const cookieToken = req.cookies?.admin_token;
   const queryToken = req.query?.token;
 
   let token;
   if (authHeader) {
-    token = authHeader.startsWith('Bearer ') ? authHeader.substring(7).trim() : authHeader.trim();
+    // Case-insensitive Bearer extraction
+    token = authHeader.toLowerCase().startsWith('bearer ')
+      ? authHeader.substring(7).trim()
+      : authHeader.trim();
   }
-  token = token || cookieToken || queryToken;
+  token = token || queryToken;
 
   // Login endpoint doesn't need auth
   if (req.path === '/login' && req.method === 'POST') return next();
@@ -140,7 +152,7 @@ router.post('/api/keys/:id/check', async (req, res) => {
   if (!key) return res.status(404).json({ error: 'Key not found' });
 
   await keyStore.checkKeyHealth(key);
-  res.json({ success: true, key: { ...key, key: key.key.substring(0, 6) + '***' } });
+  res.json({ success: true, key: { ...key, key: maskKey(key.key) } });
 });
 
 // ============================================
@@ -202,6 +214,7 @@ function getAdminHTML() {
     --border: #2d3145; --text: #e4e4e7; --text2: #9ca3af;
     --primary: #6366f1; --primary-hover: #818cf8;
     --success: #22c55e; --danger: #ef4444; --warning: #f59e0b;
+    --info: #3b82f6;
     --radius: 10px;
   }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
@@ -211,6 +224,7 @@ function getAdminHTML() {
   .header { display: flex; justify-content: space-between; align-items: center; padding: 20px 0; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
   .header h1 { font-size: 24px; font-weight: 700; background: linear-gradient(135deg, #6366f1, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
   .header .info { color: var(--text2); font-size: 13px; }
+  .header-right { display: flex; align-items: center; gap: 12px; }
 
   /* Login */
   .login-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); display: flex; align-items: center; justify-content: center; z-index: 100; }
@@ -218,13 +232,15 @@ function getAdminHTML() {
   .login-box h2 { margin-bottom: 20px; text-align: center; }
 
   /* Cards */
-  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 24px; }
   .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
   .stat-card .label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
   .stat-card .value { font-size: 28px; font-weight: 700; }
   .stat-card .value.green { color: var(--success); }
   .stat-card .value.red { color: var(--danger); }
   .stat-card .value.yellow { color: var(--warning); }
+  .stat-card .value.blue { color: var(--info); }
+  .stat-card .sub { font-size: 11px; color: var(--text2); margin-top: 4px; }
 
   /* Panels */
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 24px; }
@@ -234,23 +250,32 @@ function getAdminHTML() {
 
   /* Buttons */
   .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-primary { background: var(--primary); color: white; }
-  .btn-primary:hover { background: var(--primary-hover); }
+  .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
   .btn-danger { background: var(--danger); color: white; }
-  .btn-danger:hover { opacity: 0.85; }
+  .btn-danger:hover:not(:disabled) { opacity: 0.85; }
   .btn-success { background: var(--success); color: white; }
-  .btn-success:hover { opacity: 0.85; }
+  .btn-success:hover:not(:disabled) { opacity: 0.85; }
   .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
-  .btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+  .btn-outline:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
   .btn-sm { padding: 4px 10px; font-size: 12px; }
   .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
 
   /* Inputs */
-  input, textarea { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; color: var(--text); font-size: 14px; width: 100%; outline: none; transition: border-color 0.15s; }
+  input, textarea, select { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; color: var(--text); font-size: 14px; width: 100%; outline: none; transition: border-color 0.15s; }
   input:focus, textarea:focus { border-color: var(--primary); }
   textarea { resize: vertical; min-height: 120px; font-family: monospace; font-size: 13px; }
   label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--text2); }
   .form-group { margin-bottom: 16px; }
+
+  /* Toggle switch */
+  .toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text2); cursor: pointer; }
+  .toggle input { width: auto; display: none; }
+  .toggle-slider { width: 36px; height: 20px; background: var(--border); border-radius: 10px; position: relative; transition: background 0.2s; }
+  .toggle-slider::after { content: ''; width: 16px; height: 16px; background: white; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: transform 0.2s; }
+  .toggle input:checked + .toggle-slider { background: var(--primary); }
+  .toggle input:checked + .toggle-slider::after { transform: translateX(16px); }
 
   /* Table */
   .key-table { width: 100%; border-collapse: collapse; }
@@ -272,7 +297,7 @@ function getAdminHTML() {
   .dot-gray { background: var(--text2); }
 
   /* Toast */
-  .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: white; font-size: 14px; z-index: 1000; animation: slideIn 0.3s ease; }
+  .toast { position: fixed; top: 20px; right: 20px; padding: 12px 20px; border-radius: 8px; color: white; font-size: 14px; z-index: 1000; animation: slideIn 0.3s ease; max-width: 400px; word-break: break-word; }
   .toast-success { background: var(--success); }
   .toast-error { background: var(--danger); }
   @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
@@ -307,7 +332,15 @@ function getAdminHTML() {
       <h1>Ollama2OpenAI Admin</h1>
       <div class="info">API Endpoint: <code id="apiEndpoint"></code></div>
     </div>
-    <button class="btn btn-outline" onclick="doLogout()">Logout</button>
+    <div class="header-right">
+      <label class="toggle" title="Auto-refresh every 10s">
+        <input type="checkbox" id="autoRefresh" onchange="toggleAutoRefresh()">
+        <span class="toggle-slider"></span>
+        Auto-refresh
+      </label>
+      <button class="btn btn-outline btn-sm" onclick="loadAll()">Refresh</button>
+      <button class="btn btn-outline" onclick="doLogout()">Logout</button>
+    </div>
   </div>
 
   <!-- Stats -->
@@ -316,6 +349,7 @@ function getAdminHTML() {
     <div class="stat-card"><div class="label">Healthy</div><div class="value green" id="statHealthy">0</div></div>
     <div class="stat-card"><div class="label">Unhealthy</div><div class="value red" id="statUnhealthy">0</div></div>
     <div class="stat-card"><div class="label">Disabled</div><div class="value yellow" id="statDisabled">0</div></div>
+    <div class="stat-card"><div class="label">Cache Items</div><div class="value blue" id="statCacheItems">0</div><div class="sub" id="statCacheHitRate">-</div></div>
   </div>
 
   <!-- Import Panel -->
@@ -334,7 +368,7 @@ function getAdminHTML() {
         <input type="text" id="defaultBaseUrl" placeholder="https://ollama.com/api (default)">
       </div>
       <div class="form-group">
-        <label>Keys (one per line, supports multiple formats)</label>
+        <label>Keys (one per line, supports multiple formats. Lines starting with # are ignored.)</label>
         <textarea id="batchKeys" placeholder="Supported formats:
 sk-xxxxxxxxxxxxxxxx
 https://api.example.com|sk-xxxxxxxx
@@ -348,6 +382,15 @@ https://api.example.com/sk-xxxxxxxx"></textarea>
       </div>
       <div id="importResult" style="margin-top:12px;font-size:13px;"></div>
     </div>
+  </div>
+
+  <!-- Cache Panel -->
+  <div class="panel">
+    <div class="panel-header">
+      <h2>Cache</h2>
+      <button class="btn btn-outline btn-sm" onclick="clearCache()">Clear Cache</button>
+    </div>
+    <div class="panel-body" id="cacheInfo" style="font-size:13px;color:var(--text2);">Loading...</div>
   </div>
 
   <!-- Keys Table -->
@@ -379,6 +422,7 @@ https://api.example.com/sk-xxxxxxxx"></textarea>
 
 <script>
 let TOKEN = localStorage.getItem('admin_token') || '';
+let autoRefreshTimer = null;
 
 // Check saved token
 if (TOKEN) {
@@ -393,17 +437,24 @@ if (TOKEN) {
 function showLogin() {
   document.getElementById('loginOverlay').classList.remove('hidden');
   document.getElementById('app').classList.add('hidden');
+  stopAutoRefresh();
 }
 
 function showApp() {
   document.getElementById('loginOverlay').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
   document.getElementById('apiEndpoint').textContent = location.origin + '/v1';
+  loadAll();
+}
+
+function loadAll() {
   loadKeys();
+  loadCacheStats();
 }
 
 async function doLogin() {
   const pw = document.getElementById('loginPassword').value;
+  if (!pw) return toast('Please enter password', 'error');
   try {
     const r = await fetch('/admin/login', {
       method: 'POST',
@@ -426,6 +477,7 @@ async function doLogin() {
 function doLogout() {
   TOKEN = '';
   localStorage.removeItem('admin_token');
+  stopAutoRefresh();
   showLogin();
 }
 
@@ -444,7 +496,7 @@ async function fetchKeys() {
 async function loadKeys() {
   try {
     const r = await fetch('/admin/api/keys', { headers: authHeaders() });
-    if (!r.ok) return;
+    if (!r.ok) { if (r.status === 401) { doLogout(); } return; }
     const d = await r.json();
     renderKeys(d.keys);
     renderStats(d.summary);
@@ -453,11 +505,49 @@ async function loadKeys() {
   }
 }
 
+async function loadCacheStats() {
+  try {
+    const r = await fetch('/admin/api/cache', { headers: authHeaders() });
+    if (!r.ok) return;
+    const d = await r.json();
+    renderCacheStats(d);
+  } catch (e) { /* ignore */ }
+}
+
 function renderStats(s) {
   document.getElementById('statTotal').textContent = s.total;
   document.getElementById('statHealthy').textContent = s.healthy;
   document.getElementById('statUnhealthy').textContent = s.unhealthy;
   document.getElementById('statDisabled').textContent = s.disabled;
+}
+
+function renderCacheStats(c) {
+  const totalItems = (c.totalItems || 0);
+  document.getElementById('statCacheItems').textContent = totalItems;
+
+  const embHits = c.embeddings?.hits || 0;
+  const embMisses = c.embeddings?.misses || 0;
+  const chatHits = c.chat?.hits || 0;
+  const chatMisses = c.chat?.misses || 0;
+  const totalReqs = embHits + embMisses + chatHits + chatMisses;
+  const totalHits = embHits + chatHits;
+  const hitRate = totalReqs > 0 ? ((totalHits / totalReqs) * 100).toFixed(1) + '%' : '-';
+  document.getElementById('statCacheHitRate').textContent = 'Hit rate: ' + hitRate;
+
+  const info = document.getElementById('cacheInfo');
+  info.innerHTML =
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">' +
+      '<div><strong>Embeddings</strong> (' + (c.enabled?.embeddings ? 'ON' : 'OFF') + ')<br>' +
+        'Size: ' + (c.embeddings?.size || 0) + '/' + (c.embeddings?.maxSize || 0) +
+        ' | Hits: ' + embHits + ' | Misses: ' + embMisses +
+        ' | Rate: ' + (c.embeddings?.hitRate || '0%') +
+        ' | Evictions: ' + (c.embeddings?.evictions || 0) + '</div>' +
+      '<div><strong>Chat</strong> (' + (c.enabled?.chat ? 'ON' : 'OFF') + ')<br>' +
+        'Size: ' + (c.chat?.size || 0) + '/' + (c.chat?.maxSize || 0) +
+        ' | Hits: ' + chatHits + ' | Misses: ' + chatMisses +
+        ' | Rate: ' + (c.chat?.hitRate || '0%') +
+        ' | Evictions: ' + (c.chat?.evictions || 0) + '</div>' +
+    '</div>';
 }
 
 function renderKeys(keys) {
@@ -481,13 +571,14 @@ function renderKeys(keys) {
 
     const lastUsed = k.lastUsed ? new Date(k.lastUsed).toLocaleString() : '-';
     const baseUrlShort = k.baseUrl.length > 35 ? k.baseUrl.substring(0, 35) + '...' : k.baseUrl;
+    const failRate = k.totalRequests > 0 ? ' (' + ((k.failedRequests / k.totalRequests) * 100).toFixed(0) + '%)' : '';
 
     return '<tr>' +
       '<td>' + statusBadge + '</td>' +
       '<td class="mono">' + escHtml(k.key) + '</td>' +
       '<td class="mono" title="' + escHtml(k.baseUrl) + '">' + escHtml(baseUrlShort) + '</td>' +
       '<td>' + k.totalRequests + '</td>' +
-      '<td>' + (k.failedRequests || 0) + '</td>' +
+      '<td>' + (k.failedRequests || 0) + escHtml(failRate) + '</td>' +
       '<td>' + lastUsed + '</td>' +
       '<td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escHtml(k.lastError || '') + '">' + escHtml(k.lastError || '-') + '</td>' +
       '<td><div class="btn-group">' +
@@ -499,7 +590,7 @@ function renderKeys(keys) {
   }).join('');
 }
 
-function escHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 async function batchImport() {
   const keys = document.getElementById('batchKeys').value.trim();
@@ -514,13 +605,13 @@ async function batchImport() {
     });
     const d = await r.json();
     const msg = 'Added: ' + d.added.length + ' | Duplicates: ' + d.duplicates.length + ' | Errors: ' + d.errors.length;
-    document.getElementById('importResult').innerHTML = '<span style="color:var(--success)">' + msg + '</span>';
+    document.getElementById('importResult').innerHTML = '<span style="color:var(--success)">' + escHtml(msg) + '</span>';
     if (d.errors.length > 0) {
-      document.getElementById('importResult').innerHTML += '<br><span style="color:var(--danger)">Errors: ' + d.errors.map(e => e.input + ': ' + e.error).join(', ') + '</span>';
+      document.getElementById('importResult').innerHTML += '<br><span style="color:var(--danger)">Errors: ' + d.errors.map(e => escHtml(e.input) + ': ' + escHtml(e.error)).join(', ') + '</span>';
     }
     document.getElementById('batchKeys').value = '';
     toast(msg, 'success');
-    loadKeys();
+    loadAll();
   } catch (e) {
     toast('Import failed: ' + e.message, 'error');
   }
@@ -541,7 +632,7 @@ async function addSingleKey() {
     if (d.error) return toast(d.error, 'error');
     toast('Key added', 'success');
     document.getElementById('batchKeys').value = '';
-    loadKeys();
+    loadAll();
   } catch (e) {
     toast('Failed: ' + e.message, 'error');
   }
@@ -552,14 +643,14 @@ async function removeKey(id) {
   try {
     await fetch('/admin/api/keys/' + id, { method: 'DELETE', headers: authHeaders() });
     toast('Key removed', 'success');
-    loadKeys();
+    loadAll();
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
 async function toggleKey(id) {
   try {
     await fetch('/admin/api/keys/' + id + '/toggle', { method: 'POST', headers: authHeaders() });
-    loadKeys();
+    loadAll();
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
 
@@ -567,7 +658,7 @@ async function checkKey(id) {
   try {
     toast('Checking...', 'success');
     await fetch('/admin/api/keys/' + id + '/check', { method: 'POST', headers: authHeaders() });
-    loadKeys();
+    loadAll();
     toast('Check complete', 'success');
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
@@ -576,7 +667,7 @@ async function checkAllHealth() {
   try {
     toast('Checking all keys...', 'success');
     await fetch('/admin/api/keys/check', { method: 'POST', headers: authHeaders() });
-    loadKeys();
+    loadAll();
     toast('All checks complete', 'success');
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
@@ -584,7 +675,7 @@ async function checkAllHealth() {
 async function resetHealth() {
   try {
     await fetch('/admin/api/keys/reset-health', { method: 'POST', headers: authHeaders() });
-    loadKeys();
+    loadAll();
     toast('Health status reset', 'success');
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
 }
@@ -593,9 +684,32 @@ async function clearAll() {
   if (!confirm('Remove ALL keys? This cannot be undone.')) return;
   try {
     await fetch('/admin/api/keys', { method: 'DELETE', headers: authHeaders() });
-    loadKeys();
+    loadAll();
     toast('All keys cleared', 'success');
   } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+async function clearCache() {
+  try {
+    await fetch('/admin/api/cache', { method: 'DELETE', headers: authHeaders() });
+    loadCacheStats();
+    toast('Cache cleared', 'success');
+  } catch (e) { toast('Failed: ' + e.message, 'error'); }
+}
+
+function toggleAutoRefresh() {
+  const on = document.getElementById('autoRefresh').checked;
+  if (on) {
+    autoRefreshTimer = setInterval(loadAll, 10000);
+  } else {
+    stopAutoRefresh();
+  }
+}
+
+function stopAutoRefresh() {
+  if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+  const cb = document.getElementById('autoRefresh');
+  if (cb) cb.checked = false;
 }
 
 function toast(msg, type) {

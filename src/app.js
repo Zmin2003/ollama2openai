@@ -12,6 +12,7 @@ import adminRoutes from './routes/admin.js';
 import keyStore from './core/keyStore.js';
 import cacheManager from './core/cache.js';
 
+const VERSION = '2.2.0';
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000');
 
@@ -52,12 +53,9 @@ app.use('/v1', (req, res, next) => {
     return res.status(401).json({ error: { message: 'Missing Authorization header', type: 'auth_error' } });
   }
 
-  // BUG FIX: More robust Bearer token extraction
-  // Handle both "Bearer <token>" and raw "<token>" formats
+  // Case-insensitive Bearer token extraction
   let token;
-  if (authHeader.startsWith('Bearer ')) {
-    token = authHeader.substring(7).trim();
-  } else if (authHeader.startsWith('bearer ')) {
+  if (authHeader.toLowerCase().startsWith('bearer ')) {
     token = authHeader.substring(7).trim();
   } else {
     token = authHeader.trim();
@@ -85,7 +83,7 @@ app.get('/', (req, res) => {
   const summary = keyStore.getSummary();
   res.json({
     service: 'Ollama2OpenAI',
-    version: '2.1.0',
+    version: VERSION,
     description: 'Ollama to OpenAI API proxy with key management',
     endpoints: {
       chat: '/v1/chat/completions',
@@ -121,10 +119,12 @@ app.use((req, res) => {
 
 // Error handler
 app.use((err, req, res, next) => {
-  console.error('[Error]', err);
-  res.status(500).json({
-    error: { message: 'Internal server error', type: 'server_error' }
-  });
+  console.error(`[Error] ${req.method} ${req.path}:`, err.message || err);
+  if (!res.headersSent) {
+    res.status(err.status || 500).json({
+      error: { message: 'Internal server error', type: 'server_error' }
+    });
+  }
 });
 
 // ============================================
@@ -147,12 +147,12 @@ if (HEALTH_CHECK_INTERVAL > 0) {
 // ============================================
 // Start server
 // ============================================
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   const summary = keyStore.getSummary();
   const cacheStats = cacheManager.getStats();
   console.log('');
   console.log('=============================================');
-  console.log('  Ollama2OpenAI v2.1.0');
+  console.log(`  Ollama2OpenAI v${VERSION}`);
   console.log('=============================================');
   console.log(`  Server:     http://0.0.0.0:${PORT}`);
   console.log(`  API Base:   http://localhost:${PORT}/v1`);
@@ -164,3 +164,24 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('=============================================');
   console.log('');
 });
+
+// ============================================
+// Graceful shutdown (consolidated handler)
+// ============================================
+function gracefulShutdown(signal) {
+  console.log(`\n[${signal}] Shutting down gracefully...`);
+  keyStore.flushSync();
+  cacheManager.shutdown();
+  server.close(() => {
+    console.log('[Shutdown] Server closed.');
+    process.exit(0);
+  });
+  // Force exit after 5s if server hasn't closed
+  setTimeout(() => {
+    console.warn('[Shutdown] Forced exit after timeout.');
+    process.exit(1);
+  }, 5000);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

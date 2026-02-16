@@ -19,6 +19,25 @@ const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '2');
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
 // ============================================
+// URL rewrite middleware for aliases without /v1 prefix
+// Must be defined BEFORE route handlers so Express matches the rewritten URL
+// ============================================
+const URL_ALIASES = {
+  '/chat/completions': '/v1/chat/completions',
+  '/completions': '/v1/completions',
+  '/embeddings': '/v1/embeddings',
+  '/models': '/v1/models',
+};
+
+router.use((req, res, next) => {
+  const alias = URL_ALIASES[req.path];
+  if (alias) {
+    req.url = alias + (req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '');
+  }
+  next();
+});
+
+// ============================================
 // Helper: build target URL from key object
 // ============================================
 
@@ -484,12 +503,5 @@ router.get('/v1/models/:model', async (req, res) => {
     return res.status(e.status || 500).json({ error: { message: e.message, type: 'server_error' } });
   }
 });
-
-// BUG FIX: Aliases without /v1 prefix - use proper next() middleware chaining
-// instead of router.handle() which doesn't exist in Express Router
-router.post('/chat/completions', (req, res, next) => { req.url = '/v1/chat/completions'; next(); });
-router.post('/completions', (req, res, next) => { req.url = '/v1/completions'; next(); });
-router.post('/embeddings', (req, res, next) => { req.url = '/v1/embeddings'; next(); });
-router.get('/models', (req, res, next) => { req.url = '/v1/models'; next(); });
 
 export default router;
