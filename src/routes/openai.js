@@ -241,7 +241,7 @@ router.post('/v1/chat/completions', async (req, res) => {
     }
 
     const ollamaReq = transformChatRequest(openaiReq);
-    const isStream = ollamaReq.stream !== false;
+    const isStream = ollamaReq.stream === true;
 
     // Check cache for non-streaming requests
     const cache = cacheManager.getChatCache();
@@ -384,7 +384,7 @@ router.post('/v1/completions', async (req, res) => {
     }
 
     const ollamaReq = transformCompletionsRequest(openaiReq);
-    const isStream = ollamaReq.stream !== false;
+    const isStream = ollamaReq.stream === true;
 
     const { res: ollamaRes, backend } = await proxyWithRetry('/generate', 'POST', ollamaReq, isStream, openaiReq.model);
 

@@ -32,7 +32,7 @@ export function transformChatRequest(openaiReq) {
   const ollamaReq = {
     model: openaiReq.model,
     messages: [],
-    stream: openaiReq.stream !== false,
+    stream: openaiReq.stream === true,
   };
 
   // Transform messages
@@ -145,7 +145,7 @@ export function transformCompletionsRequest(openaiReq) {
   const ollamaReq = {
     model: openaiReq.model,
     prompt: openaiReq.prompt || '',
-    stream: openaiReq.stream !== false,
+    stream: openaiReq.stream === true,
   };
 
   if (openaiReq.suffix) ollamaReq.suffix = openaiReq.suffix;
