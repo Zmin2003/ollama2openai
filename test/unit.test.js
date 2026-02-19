@@ -77,7 +77,8 @@ test('basic chat request transformation', () => {
   assert.equal(result.messages.length, 1);
   assert.equal(result.messages[0].role, 'user');
   assert.equal(result.messages[0].content, 'Hello');
-  assert.equal(result.stream, true); // default to stream
+  // OpenAI spec: stream defaults to false when not specified
+  assert.equal(result.stream, false);
 });
 
 test('stream=false is preserved', () => {
@@ -212,7 +213,8 @@ test('basic completions request', () => {
   const result = transformCompletionsRequest(req);
   assert.equal(result.model, 'llama3');
   assert.equal(result.prompt, 'Once upon a time');
-  assert.equal(result.stream, true);
+  // OpenAI spec: stream defaults to false when not specified
+  assert.equal(result.stream, false);
 });
 
 test('completions with suffix', () => {

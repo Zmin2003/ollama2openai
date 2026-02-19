@@ -58,7 +58,10 @@ async function proxyToOllama(baseUrl, key, apiPath, method, body, isStream = fal
   if (key) headers['Authorization'] = `Bearer ${key}`;
 
   const controller = new AbortController();
-  const timeout = isStream ? CONNECT_TIMEOUT : REQUEST_TIMEOUT;
+  // BUG FIX: Streaming requests need the full REQUEST_TIMEOUT (they can be long-running).
+  // CONNECT_TIMEOUT was previously (incorrectly) used for streams, causing premature aborts.
+  // Non-streaming also uses REQUEST_TIMEOUT for long inference tasks.
+  const timeout = REQUEST_TIMEOUT;
   const timer = setTimeout(() => controller.abort(), timeout);
 
   try {
@@ -109,6 +112,19 @@ function recordBackendSuccess(backend, tokens = 0) {
 function recordBackendFailure(backend, error) {
   if (backend.channelId) channelManager.recordFailure(backend.channelId, error);
   if (backend.keyId) keyStore.recordFailure(backend.keyId, error);
+}
+
+/**
+ * BUG FIX: Release concurrency slot without recording a request outcome.
+ * This is needed when we need to release concurrency after acquireConcurrency
+ * was called but before the request completes (e.g. error path).
+ */
+function releaseConcurrency(backend) {
+  if (backend.channelId) channelManager.releaseConcurrency(backend.channelId);
+  if (backend.keyId) {
+    const key = keyStore.getKeyById(backend.keyId);
+    if (key && key.currentConcurrent > 0) key.currentConcurrent--;
+  }
 }
 
 // ============================================
@@ -311,7 +327,16 @@ router.post('/v1/chat/completions', async (req, res) => {
       ollamaRes.body,
       (line) => {
         if (aborted) return;
-        const ollamaChunk = JSON.parse(line);
+        // Skip non-JSON lines (e.g. empty lines, SSE comments)
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':')) return;
+        let ollamaChunk;
+        try {
+          ollamaChunk = JSON.parse(trimmed);
+        } catch (e) {
+          if (LOG_LEVEL === 'debug') logger.debug('Stream', `Non-JSON line skipped: ${trimmed.substring(0, 100)}`);
+          return;
+        }
         if (ollamaChunk.message?.content) tokenCount++;
         const openaiChunk = transformStreamChunk(ollamaChunk, chatId, created, openaiReq.model, isFirstChunk, tokenCount);
         isFirstChunk = false;
@@ -423,7 +448,16 @@ router.post('/v1/completions', async (req, res) => {
       ollamaRes.body,
       (line) => {
         if (aborted) return;
-        const ollamaChunk = JSON.parse(line);
+        // Skip non-JSON lines (e.g. empty lines, SSE comments)
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':')) return;
+        let ollamaChunk;
+        try {
+          ollamaChunk = JSON.parse(trimmed);
+        } catch (e) {
+          if (LOG_LEVEL === 'debug') logger.debug('Stream', `Non-JSON line skipped (completions): ${trimmed.substring(0, 100)}`);
+          return;
+        }
         const sseChunk = {
           id: chatId, object: 'text_completion', created, model: openaiReq.model,
           choices: [{ index: 0, text: ollamaChunk.response || '', finish_reason: ollamaChunk.done ? 'stop' : null }],

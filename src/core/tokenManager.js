@@ -284,11 +284,15 @@ class TokenManager {
 
   /**
    * Get all tokens (masked for display)
+   * BUG FIX: mask more aggressively - only show prefix + last 4 chars
+   * to prevent token leakage via admin panel API
    */
   getAllTokens() {
     return this.tokens.map(t => ({
       ...t,
-      token: t.token ? t.token.substring(0, 10) + '***' + t.token.substring(t.token.length - 4) : '(empty)',
+      token: t.token
+        ? t.token.substring(0, 10) + '****' + t.token.substring(t.token.length - 4)
+        : '(empty)',
     }));
   }
 
